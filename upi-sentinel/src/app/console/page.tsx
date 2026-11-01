@@ -1,59 +1,27 @@
 'use client';
 
 import Link from 'next/link';
+import { useEffect, useState } from 'react';
 import {
-  Shield, Activity, AlertTriangle, Link as LinkIcon, Users,
+  Shield, Activity, AlertTriangle, Link as LinkIcon,
   Phone, Smartphone, Brain, Clock, Play, ChevronRight,
-  TrendingUp, TrendingDown, Minus
 } from 'lucide-react';
 import {
   Card, CardHeader, CardTitle, MetricCard, Badge, Button,
-  EmptyState, StatusIndicator, RiskScoreRing, Progress
+  EmptyState, StatusIndicator, Progress
 } from '@/components/ui';
 import AgentVisualization from '@/components/AgentVisualization';
+import { checkHealth, API_BASE } from '@/lib/api';
 
-const kpiCards = [
-  {
-    title: 'Security Events',
-    value: '—',
-    subtitle: 'Waiting for backend',
-    icon: <Activity size={18} />,
-    color: 'blue' as const,
-    isDemo: true,
-  },
-  {
-    title: 'Threats Detected',
-    value: '—',
-    subtitle: 'No active session',
-    icon: <AlertTriangle size={18} />,
-    color: 'red' as const,
-    isDemo: true,
-  },
-  {
-    title: 'URLs Analyzed',
-    value: '—',
-    subtitle: 'No URLs submitted',
-    icon: <LinkIcon size={18} />,
-    color: 'cyan' as const,
-    isDemo: true,
-  },
-  {
-    title: 'Active Agents',
-    value: '0/7',
-    subtitle: 'All agents idle',
-    icon: <Brain size={18} />,
-    color: 'emerald' as const,
-    isDemo: false,
-  },
-  {
-    title: 'Critical Incidents',
-    value: '—',
-    subtitle: 'No data',
-    icon: <Shield size={18} />,
-    color: 'amber' as const,
-    isDemo: true,
-  },
-];
+interface OverviewData {
+  securityEvents: number;
+  threatsDetected: number;
+  urlsAnalyzed: number;
+  activeAgents: number;
+  criticalIncidents: number;
+  totalAnalyses: number;
+  isLive: boolean;
+}
 
 const agentList = [
   { id: 'orchestrator', name: 'Central Orchestrator', status: 'Idle', color: '#3B82F6' },
@@ -66,17 +34,91 @@ const agentList = [
 ];
 
 export default function OverviewPage() {
+  const [backendLive, setBackendLive] = useState(false);
+  const [overview, setOverview] = useState<OverviewData | null>(null);
+
+  useEffect(() => {
+    async function loadData() {
+      const health = await checkHealth();
+      if (!health || health.database !== 'connected') {
+        setBackendLive(false);
+        return;
+      }
+      setBackendLive(true);
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/dashboard/overview`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          const data = await res.json() as OverviewData;
+          setOverview(data);
+        }
+      } catch {
+        // ignore — backend connected but overview failed
+      }
+    }
+    loadData();
+    const interval = setInterval(loadData, 30_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const kpiCards = [
+    {
+      title: 'Security Events',
+      value: overview ? String(overview.securityEvents) : '—',
+      subtitle: overview ? 'Total analyses run' : 'Waiting for backend',
+      icon: <Activity size={18} />,
+      color: 'blue' as const,
+      isDemo: !backendLive,
+    },
+    {
+      title: 'Threats Detected',
+      value: overview ? String(overview.threatsDetected) : '—',
+      subtitle: overview ? 'High + Critical risk' : 'No active session',
+      icon: <AlertTriangle size={18} />,
+      color: 'red' as const,
+      isDemo: !backendLive,
+    },
+    {
+      title: 'URLs Analyzed',
+      value: overview ? String(overview.urlsAnalyzed) : '—',
+      subtitle: overview ? 'Link analyses' : 'No URLs submitted',
+      icon: <LinkIcon size={18} />,
+      color: 'cyan' as const,
+      isDemo: !backendLive,
+    },
+    {
+      title: 'Active Agents',
+      value: '0/7',
+      subtitle: 'All agents idle',
+      icon: <Brain size={18} />,
+      color: 'emerald' as const,
+      isDemo: false,
+    },
+    {
+      title: 'Critical Incidents',
+      value: overview ? String(overview.criticalIncidents) : '—',
+      subtitle: overview ? 'Critical risk only' : 'No data',
+      icon: <Shield size={18} />,
+      color: 'amber' as const,
+      isDemo: !backendLive,
+    },
+  ];
+
   return (
     <div className="p-4 md:p-6 space-y-6">
       {/* Backend notice */}
-      <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-[#080F20] border border-[#1E2D47]">
-        <StatusIndicator status="offline" size="sm" />
+      <div className={`flex items-center gap-3 px-4 py-3 rounded-xl border ${backendLive ? 'bg-emerald-500/5 border-emerald-500/15' : 'bg-[#080F20] border-[#1E2D47]'}`}>
+        <StatusIndicator status={backendLive ? 'online' : 'offline'} size="sm" />
         <div className="flex-1 min-w-0">
           <p className="text-xs font-medium text-[#94A3B8]">
-            Backend Not Connected — <span className="text-[#64748B]">Showing initial state. Start a session or connect the backend to see live security data.</span>
+            {backendLive
+              ? <><span className="text-emerald-400 font-semibold">Backend Connected</span> — Showing live security data from database.</>
+              : <>Backend Not Connected — <span className="text-[#64748B]">Showing initial state. Start a session or connect the backend to see live security data.</span></>
+            }
           </p>
         </div>
-        <Badge variant="demo">DEMO MODE</Badge>
+        <Badge variant={backendLive ? 'status' : 'demo'}>{backendLive ? 'LIVE' : 'DEMO MODE'}</Badge>
       </div>
 
       {/* KPI row */}

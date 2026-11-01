@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { Phone, Upload, Mic, Globe, Play, AlertTriangle, CheckCircle2, Info, MicOff, Loader2, XCircle } from 'lucide-react';
+import { useState, useRef, useCallback } from 'react';
+import { Phone, Upload, Mic, Globe, Play, AlertTriangle, CheckCircle2, Info, MicOff, Loader2, XCircle, Square, Radio } from 'lucide-react';
 import { Card, CardHeader, CardTitle, Badge, Button, Input, Textarea, Select, EmptyState, Progress } from '@/components/ui';
 import { cn, getRiskBg, getRiskColor, formatRiskScore, formatConfidence } from '@/lib/utils';
 import {
@@ -35,11 +35,30 @@ type AnalysisState =
   | { phase: 'complete'; risk: RiskPayload | null; call: CallResultPayload | null; events: BackendEvent[] }
   | { phase: 'error'; message: string };
 
+// Sarvam language code map
+const SARVAM_LANG: Record<string, string> = {
+  auto: 'hi-IN', hindi: 'hi-IN', punjabi: 'pa-IN', hinglish: 'hi-IN', english: 'en-IN',
+};
+
+type MicState =
+  | { phase: 'idle' }
+  | { phase: 'requesting' }
+  | { phase: 'recording'; sessionId: string; chunkIndex: number; transcript: string; wsCleanup: (() => void) | null }
+  | { phase: 'stopped'; transcript: string; analysisId: string | null; events: BackendEvent[] }
+  | { phase: 'error'; message: string };
+
 export default function CallIntelligencePage() {
   const [inputMode, setInputMode] = useState<'transcript' | 'audio' | 'mic'>('transcript');
   const [transcript, setTranscript] = useState('');
   const [language, setLanguage] = useState('auto');
   const [state, setState] = useState<AnalysisState>({ phase: 'idle' });
+  const [micState, setMicState] = useState<MicState>({ phase: 'idle' });
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const chunkIndexRef = useRef(0);
+  const sessionIdRef = useRef('');
 
   const isLoading = state.phase === 'submitting' || state.phase === 'polling';
 
@@ -66,6 +85,9 @@ export default function CallIntelligencePage() {
 
       const risk = extractRiskAssessment(allEvents);
       const call = extractCallResult(allEvents);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('last_analysis_id', analysis_id);
+      }
       setState({ phase: 'complete', risk, call, events: allEvents });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to connect to backend';
@@ -75,6 +97,88 @@ export default function CallIntelligencePage() {
 
   function reset() {
     setState({ phase: 'idle' });
+  }
+
+  const startMicMonitoring = useCallback(async () => {
+    setMicState({ phase: 'requesting' });
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+
+      const sessionId = crypto.randomUUID();
+      sessionIdRef.current = sessionId;
+      chunkIndexRef.current = 0;
+      chunksRef.current = [];
+
+      // Open WebSocket to receive live analysis events
+      const { openAnalysisSocket } = await import('@/lib/api');
+      const wsCleanup = openAnalysisSocket(sessionId, (event) => {
+        setMicState((prev) => {
+          if (prev.phase !== 'recording') return prev;
+          return { ...prev }; // trigger re-render when events arrive
+        });
+      });
+
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = async (e) => {
+        if (e.data.size === 0) return;
+        const arrayBuf = await e.data.arrayBuffer();
+        const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuf)));
+        const idx = chunkIndexRef.current++;
+        const langCode = SARVAM_LANG[language] ?? 'hi-IN';
+
+        try {
+          const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8001'}/api/v1/call/analyze-audio`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ audio_base64: base64, language: langCode, session_id: sessionId, chunk_index: idx }),
+          });
+          if (res.ok) {
+            const data = await res.json() as { transcript_segment?: string; accumulated_transcript?: string };
+            const seg = data.transcript_segment ?? '';
+            if (seg) {
+              setMicState((prev) => {
+                if (prev.phase !== 'recording') return prev;
+                return { ...prev, transcript: data.accumulated_transcript ?? prev.transcript };
+              });
+            }
+          }
+        } catch {
+          // network error — keep recording
+        }
+      };
+
+      recorder.start(3000); // emit chunks every 3s
+
+      setMicState({ phase: 'recording', sessionId, chunkIndex: 0, transcript: '', wsCleanup });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Microphone access denied';
+      setMicState({ phase: 'error', message: msg });
+    }
+  }, [language]);
+
+  function stopMicMonitoring() {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    const sessionId = sessionIdRef.current;
+    const currentTranscript = micState.phase === 'recording' ? micState.transcript : '';
+    if (micState.phase === 'recording' && micState.wsCleanup) {
+      micState.wsCleanup();
+    }
+    setMicState({ phase: 'stopped', transcript: currentTranscript, analysisId: sessionId || null, events: [] });
+  }
+
+  function resetMic() {
+    setMicState({ phase: 'idle' });
+    chunkIndexRef.current = 0;
+    sessionIdRef.current = '';
   }
 
   const riskData = state.phase === 'complete' ? state.risk : null;
@@ -173,17 +277,108 @@ export default function CallIntelligencePage() {
 
             {inputMode === 'mic' && (
               <div className="space-y-4">
-                <div className="rounded-xl bg-[#080F20] border border-[#1E2D47] p-8 text-center">
-                  <MicOff size={24} className="text-[#64748B] mx-auto mb-3" />
-                  <p className="text-sm text-[#94A3B8]">Browser Microphone Input</p>
-                  <p className="text-xs text-[#64748B] mt-1 max-w-sm mx-auto">
-                    This feature requires explicit microphone permission and Sarvam AI backend integration.
-                  </p>
-                </div>
-                <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/5 border border-amber-500/15">
-                  <Info size={12} className="text-amber-400 mt-0.5 flex-shrink-0" />
-                  <p className="text-xs text-amber-300/70">
-                    Microphone analysis requires backend STT service (Sarvam AI) to be configured.
+                <Select
+                  label="Language"
+                  options={LANG_OPTIONS}
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value)}
+                  disabled={micState.phase === 'recording' || micState.phase === 'requesting'}
+                />
+
+                {/* Idle state */}
+                {micState.phase === 'idle' && (
+                  <>
+                    <div className="rounded-xl bg-[#080F20] border border-[#1E2D47] p-8 text-center">
+                      <Mic size={24} className="text-blue-400 mx-auto mb-3" />
+                      <p className="text-sm text-[#94A3B8]">Live Microphone Monitoring</p>
+                      <p className="text-xs text-[#64748B] mt-1 max-w-sm mx-auto">
+                        Audio is captured in 3-second chunks and transcribed via Sarvam AI.
+                        Analysis runs in real-time as speech is detected.
+                      </p>
+                    </div>
+                    <Button variant="gradient" size="md" onClick={startMicMonitoring}>
+                      <Radio size={13} />
+                      Start Live Monitoring
+                    </Button>
+                  </>
+                )}
+
+                {/* Requesting permission */}
+                {micState.phase === 'requesting' && (
+                  <div className="rounded-xl bg-[#080F20] border border-blue-500/20 p-8 text-center">
+                    <Loader2 size={24} className="text-blue-400 mx-auto mb-3 animate-spin" />
+                    <p className="text-sm text-[#94A3B8]">Requesting microphone permission…</p>
+                  </div>
+                )}
+
+                {/* Recording state */}
+                {micState.phase === 'recording' && (
+                  <>
+                    <div className="rounded-xl bg-red-500/5 border border-red-500/20 p-4 text-center space-y-2">
+                      <div className="flex items-center justify-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
+                        <p className="text-sm font-semibold text-red-400">Recording Live</p>
+                      </div>
+                      <p className="text-xs text-[#64748B]">Session: {micState.sessionId.slice(0, 8)}…</p>
+                      <p className="text-xs text-[#64748B]">Chunks sent: {micState.chunkIndex}</p>
+                    </div>
+                    {micState.transcript && (
+                      <div className="rounded-xl bg-[#080F20] border border-[#1E2D47] p-3">
+                        <p className="text-[10px] text-[#64748B] mb-1">Live Transcript</p>
+                        <p className="text-xs text-[#94A3B8] leading-relaxed whitespace-pre-wrap">{micState.transcript}</p>
+                      </div>
+                    )}
+                    <Button variant="danger" size="md" onClick={stopMicMonitoring}>
+                      <Square size={13} />
+                      Stop Monitoring
+                    </Button>
+                  </>
+                )}
+
+                {/* Stopped state */}
+                {micState.phase === 'stopped' && (
+                  <>
+                    <div className="rounded-xl bg-emerald-500/5 border border-emerald-500/20 p-4">
+                      <p className="text-xs font-semibold text-emerald-400 mb-1">Recording Stopped</p>
+                      {micState.transcript ? (
+                        <>
+                          <p className="text-xs text-[#94A3B8] leading-relaxed whitespace-pre-wrap">{micState.transcript}</p>
+                          {micState.analysisId && (
+                            <p className="text-[10px] text-[#64748B] mt-2">
+                              Analysis ID: {micState.analysisId.slice(0, 8)}… — check Real-Time Monitor for results
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="text-xs text-[#64748B]">No speech detected. Check microphone and try again.</p>
+                      )}
+                    </div>
+                    <Button variant="secondary" size="md" onClick={resetMic}>
+                      New Session
+                    </Button>
+                  </>
+                )}
+
+                {/* Error state */}
+                {micState.phase === 'error' && (
+                  <>
+                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/8 border border-red-500/20">
+                      <XCircle size={13} className="text-red-400" />
+                      <div>
+                        <p className="text-xs font-semibold text-red-300">Microphone Error</p>
+                        <p className="text-[10px] text-[#94A3B8]">{micState.message}</p>
+                      </div>
+                    </div>
+                    <Button variant="secondary" size="md" onClick={resetMic}>
+                      Try Again
+                    </Button>
+                  </>
+                )}
+
+                <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-blue-500/5 border border-blue-500/15">
+                  <Info size={12} className="text-blue-400 mt-0.5 flex-shrink-0" />
+                  <p className="text-xs text-blue-300/70">
+                    Audio is processed on the backend via Sarvam AI. No audio is stored permanently.
                   </p>
                 </div>
               </div>

@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import os
+import pathlib
 from functools import lru_cache
-from typing import List, Optional
+from typing import List
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Resolve .env relative to the backend/ root (3 levels up from app/core/config.py).
+# Path: app/core/config.py → app/core → app → backend/
+# This ensures .env is found regardless of where uvicorn is launched from.
+_BACKEND_DIR = pathlib.Path(__file__).parent.parent.parent
+_ENV_FILE = _BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -31,7 +38,7 @@ class Settings(BaseSettings):
     # Database
     # Default is SQLite for zero-configuration development.
     # Set DATABASE_URL in .env to switch to PostgreSQL for production.
-    database_url: str = "sqlite+aiosqlite:///./upi_sentinel.db"
+    database_url: str = f"sqlite+aiosqlite:///{_BACKEND_DIR / 'upi_sentinel.db'}"
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

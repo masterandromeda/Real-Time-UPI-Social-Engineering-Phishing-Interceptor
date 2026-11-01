@@ -1,10 +1,11 @@
 'use client';
 
 import { useState } from 'react';
-import { Brain, Phone, Link as LinkIcon, Smartphone, AlertTriangle, Play, Info, ArrowRight, ChevronRight } from 'lucide-react';
-import { Card, CardHeader, CardTitle, Badge, Button, Progress, EmptyState, RiskScoreRing } from '@/components/ui';
+import { Brain, Phone, Link as LinkIcon, Smartphone, AlertTriangle, Play, Info, ChevronRight, Loader2 } from 'lucide-react';
+import { Card, CardHeader, CardTitle, Badge, Button, Progress, RiskScoreRing } from '@/components/ui';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
+import { API_BASE } from '@/lib/api';
 
 const SCAM_STAGES = [
   { id: 'initial_contact', label: 'Initial Contact', desc: 'First contact established' },
@@ -55,25 +56,58 @@ function SignalInput({
   );
 }
 
+interface PredictionResult {
+  correlated_score: number;
+  risk_level: 'low' | 'medium' | 'high' | 'critical';
+  predicted_stage: string;
+  confidence: number;
+  explanation: string;
+}
+
 export default function ScamPredictionPage() {
   const [callScore, setCallScore] = useState(0);
   const [linkScore, setLinkScore] = useState(0);
   const [deviceScore, setDeviceScore] = useState(0);
-  const [predicted, setPredicted] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<PredictionResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const correlatedScore = Math.round((callScore * 0.4 + linkScore * 0.35 + deviceScore * 0.25));
-  const riskLevel =
-    correlatedScore >= 75 ? 'critical' :
-    correlatedScore >= 50 ? 'high' :
-    correlatedScore >= 25 ? 'medium' : 'low';
+  const displayScore = result?.correlated_score ?? Math.round(callScore * 0.4 + linkScore * 0.35 + deviceScore * 0.25);
+  const displayLevel = result?.risk_level ?? (
+    displayScore >= 75 ? 'critical' :
+    displayScore >= 50 ? 'high' :
+    displayScore >= 25 ? 'medium' : 'low'
+  );
 
   const riskColors = {
     critical: '#EF4444', high: '#F97316', medium: '#F59E0B', low: '#10B981',
   };
 
-  function handlePredict() {
+  async function handlePredict() {
     if (callScore === 0 && linkScore === 0 && deviceScore === 0) return;
-    setPredicted(true);
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/prediction/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          call_risk_score: callScore,
+          link_risk_score: linkScore,
+          device_risk_score: deviceScore,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as PredictionResult;
+      setResult(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Backend not available');
+      // Still show local estimate on error
+      setResult(null);
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
@@ -119,14 +153,17 @@ export default function ScamPredictionPage() {
             placeholder="Risk score from Device Guardian assessment, or manual estimate"
           />
 
+          {error && (
+            <p className="text-xs text-amber-400">⚠ Backend unavailable — showing local estimate</p>
+          )}
           <Button
             variant="gradient" size="md"
-            disabled={callScore === 0 && linkScore === 0 && deviceScore === 0}
+            disabled={(callScore === 0 && linkScore === 0 && deviceScore === 0) || loading}
             onClick={handlePredict}
             className="w-full sm:w-auto"
           >
-            <Brain size={13} />
-            Correlate and Predict
+            {loading ? <Loader2 size={13} className="animate-spin" /> : <Brain size={13} />}
+            {loading ? 'Analyzing…' : 'Correlate and Predict'}
           </Button>
         </div>
 
@@ -134,18 +171,21 @@ export default function ScamPredictionPage() {
         <div className="space-y-4">
           {/* Score ring */}
           <Card>
-            <CardHeader><CardTitle>Correlated Risk Score</CardTitle></CardHeader>
+            <CardHeader>
+              <CardTitle>Correlated Risk Score</CardTitle>
+              {result && <Badge variant="status">BACKEND</Badge>}
+            </CardHeader>
             <div className="flex flex-col items-center py-4">
-              <RiskScoreRing score={correlatedScore} size={100} label="Risk Score" />
+              <RiskScoreRing score={displayScore} size={100} label="Risk Score" />
               <div className="mt-3 text-center">
                 <p
                   className="text-sm font-bold capitalize"
-                  style={{ color: riskColors[riskLevel] }}
+                  style={{ color: riskColors[displayLevel] }}
                 >
-                  {riskLevel} Risk
+                  {displayLevel} Risk
                 </p>
                 <p className="text-xs text-[#64748B] mt-0.5">
-                  Weighted: 40% call, 35% link, 25% device
+                  {result ? `Confidence: ${Math.round(result.confidence * 100)}%` : 'Weighted: 40% call, 35% link, 25% device'}
                 </p>
               </div>
             </div>
@@ -157,20 +197,31 @@ export default function ScamPredictionPage() {
             </div>
           </Card>
 
+          {result?.explanation && (
+            <Card>
+              <CardHeader><CardTitle>AI Explanation</CardTitle></CardHeader>
+              <p className="text-xs text-[#94A3B8] leading-relaxed">{result.explanation}</p>
+            </Card>
+          )}
+
           {/* Scam stage */}
           <Card>
             <CardHeader>
               <CardTitle>Predicted Scam Stage</CardTitle>
-              {predicted && <Badge variant="demo">ESTIMATED</Badge>}
+              {result ? <Badge variant="status">BACKEND</Badge> : (result === null && displayScore > 0) ? <Badge variant="demo">ESTIMATED</Badge> : null}
             </CardHeader>
-            {!predicted ? (
+            {displayScore === 0 && !result ? (
               <p className="text-xs text-[#64748B] py-4 text-center">Run correlation to see predicted stage</p>
             ) : (
               <div className="space-y-1.5">
                 {SCAM_STAGES.map((stage, i) => {
                   const stageScore = (i / (SCAM_STAGES.length - 1)) * 100;
-                  const active = correlatedScore >= stageScore && correlatedScore < stageScore + (100 / SCAM_STAGES.length) + 10;
-                  const past = correlatedScore > stageScore + (100 / SCAM_STAGES.length);
+                  const active = result
+                    ? stage.id === result.predicted_stage
+                    : (displayScore >= stageScore && displayScore < stageScore + (100 / SCAM_STAGES.length) + 10);
+                  const past = result
+                    ? SCAM_STAGES.findIndex((s) => s.id === result.predicted_stage) > i
+                    : displayScore > stageScore + (100 / SCAM_STAGES.length);
                   return (
                     <div
                       key={stage.id}
@@ -189,7 +240,7 @@ export default function ScamPredictionPage() {
                   );
                 })}
                 <p className="text-[10px] text-[#64748B] mt-2 pt-2 border-t border-[#1E2D47]">
-                  ⚠ Stage prediction is approximate. Connect backend for AI-powered analysis.
+                  {result ? '✓ Stage predicted by backend AI' : '⚠ Stage prediction is approximate. Connect backend for AI-powered analysis.'}
                 </p>
               </div>
             )}

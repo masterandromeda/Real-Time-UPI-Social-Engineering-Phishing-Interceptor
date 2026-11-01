@@ -24,7 +24,7 @@ from app.schemas.schemas import (
     PredictionRequest, PredictionResponse,
     InterventionRecommendRequest, InterventionAcknowledgeRequest,
     SafetyInterventionResponse, AnalysisCreateRequest, AnalysisSummary,
-    DemoScenarioRequest, RiskAssessmentResponse
+    DemoScenarioRequest, RiskAssessmentResponse, AudioChunkRequest
 )
 from app.realtime.websocket import manager
 
@@ -312,6 +312,77 @@ async def analyze_call(
 
     background_tasks.add_task(run_bg)
     return {"analysis_id": analysis_id, "status": "processing", "message": "Analysis started. Connect to WebSocket for real-time updates."}
+
+
+# In-memory session transcript accumulator (resets on restart)
+_session_transcripts: dict[str, list[str]] = {}
+
+
+@router.post("/call/analyze-audio")
+async def analyze_audio_chunk(
+    payload: AudioChunkRequest,
+    background_tasks: BackgroundTasks,
+):
+    """Receive a base64-encoded audio chunk, transcribe via Sarvam AI, and run analysis."""
+    import base64
+    from app.integrations.sarvam_client import transcribe_audio
+
+    # Map frontend language labels to Sarvam language codes
+    _lang_map = {
+        "auto": "hi-IN", "hindi": "hi-IN", "english": "en-IN",
+        "punjabi": "pa-IN", "hinglish": "hi-IN",
+        # pass-through for already-valid codes
+    }
+    lang_code = _lang_map.get(payload.language, payload.language)
+    if not lang_code:
+        lang_code = "hi-IN"
+
+    # Decode base64 audio
+    try:
+        audio_bytes = base64.b64decode(payload.audio_base64)
+    except Exception:
+        return {"session_id": payload.session_id, "chunk_index": payload.chunk_index,
+                "transcript_segment": "", "status": "decode_error"}
+
+    # Transcribe
+    result = await transcribe_audio(
+        audio_bytes=audio_bytes,
+        filename=f"chunk_{payload.chunk_index}.wav",
+        language_code=lang_code,
+    )
+
+    transcript_segment = result.get("transcript") or ""
+
+    # Accumulate transcript for this session
+    if payload.session_id not in _session_transcripts:
+        _session_transcripts[payload.session_id] = []
+    if transcript_segment:
+        _session_transcripts[payload.session_id].append(transcript_segment)
+
+    accumulated = " ".join(_session_transcripts[payload.session_id])
+
+    # If we have enough text, run analysis in background
+    if accumulated.strip() and len(accumulated) >= 20:
+        analysis_id = payload.session_id
+
+        async def run_bg():
+            await run_full_analysis(
+                analysis_id=analysis_id,
+                transcript=accumulated,
+                language=payload.language,
+                is_demo=payload.is_demo,
+            )
+
+        background_tasks.add_task(run_bg)
+
+    return {
+        "session_id": payload.session_id,
+        "chunk_index": payload.chunk_index,
+        "transcript_segment": transcript_segment,
+        "accumulated_transcript": accumulated,
+        "transcription_status": result.get("transcription_status", "unknown"),
+        "status": "ok",
+    }
 
 
 # ─── Link Analysis ────────────────────────────────────────────────────────────

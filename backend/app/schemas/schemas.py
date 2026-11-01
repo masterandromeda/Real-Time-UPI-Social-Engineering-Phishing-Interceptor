@@ -376,3 +376,14 @@ class HealthResponse(BaseModel):
     database: str
     redis: str
     timestamp: datetime
+
+
+# ─── Audio Chunk Schemas ───────────────────────────────────────────────────────
+
+class AudioChunkRequest(BaseModel):
+    audio_base64: str = Field(..., description="Base64-encoded audio bytes")
+    language: str = Field(default="hi-IN", description="Sarvam language code, e.g. hi-IN")
+    session_id: str = Field(..., description="Shared session ID for this mic session")
+    chunk_index: int = Field(..., ge=0)
+    is_demo: bool = False
+

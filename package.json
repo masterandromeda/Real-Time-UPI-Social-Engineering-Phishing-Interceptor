@@ -1,0 +1,9 @@
+{
+  "name": "upi-sentinel-root",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "cd upi-sentinel && npm run dev:full",
+    "start": "cd upi-sentinel && npm run dev:full"
+  }
+}

@@ -1,11 +1,21 @@
 'use client';
 
 import { useState } from 'react';
-import { AlertTriangle, ShieldCheck, ShieldAlert, Info, CheckCircle2, XCircle, Eye } from 'lucide-react';
+import { AlertTriangle, ShieldCheck, ShieldAlert, Info, CheckCircle2, XCircle, Eye, Download, Loader2 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, Badge, Button, RiskScoreRing } from '@/components/ui';
 import { cn } from '@/lib/utils';
+import { API_BASE, type BackendEvent } from '@/lib/api';
 
-const DEMO_SCENARIOS = [
+const DEMO_SCENARIOS: Array<{
+  id: string;
+  label: string;
+  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+  score: number;
+  reason: string;
+  evidence: string[];
+  recommended: string;
+  isSimulated: boolean;
+}> = [
   {
     id: 'medium',
     label: 'Medium Risk — Call from Unknown Number',
@@ -61,11 +71,80 @@ export default function SafetyInterventionPage() {
   const [scenario, setScenario] = useState<typeof DEMO_SCENARIOS[0] | null>(null);
   const [holdActive, setHoldActive] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [importLoading, setImportLoading] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
   function loadScenario(s: typeof DEMO_SCENARIOS[0]) {
     setScenario(s);
     setHoldActive(false);
     setAcknowledged(false);
+    setImportError(null);
+  }
+
+  async function importLastAnalysis() {
+    setImportLoading(true);
+    setImportError(null);
+    try {
+      const analysisId = typeof window !== 'undefined'
+        ? localStorage.getItem('last_analysis_id')
+        : null;
+      if (!analysisId) {
+        setImportError('No recent analysis found. Run a Call, Link, or Device analysis first.');
+        return;
+      }
+      const res = await fetch(`${API_BASE}/api/v1/analysis/${analysisId}/events`, {
+        signal: AbortSignal.timeout(6000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { events: BackendEvent[] };
+      const events = data.events ?? [];
+
+      // Extract risk from risk.updated event
+      const riskEv = events.find((e) => e.event_type === 'risk.updated');
+      if (!riskEv) {
+        setImportError('Analysis found but no risk assessment yet. Wait for it to complete.');
+        return;
+      }
+      const risk = riskEv.payload as {
+        risk_level?: string; overall_score?: number; explanation?: string;
+        scam_category?: string; contributing_signals?: Array<{ signal: string; evidence: string[] }>;
+      };
+      const riskLevel = (risk.risk_level ?? 'low') as keyof typeof riskConfig;
+      const score = Math.round(risk.overall_score ?? 0);
+
+      const evidenceList: string[] = [];
+      for (const sig of risk.contributing_signals ?? []) {
+        for (const ev of sig.evidence ?? []) {
+          evidenceList.push(ev);
+        }
+      }
+      if (evidenceList.length === 0 && risk.explanation) {
+        evidenceList.push(risk.explanation);
+      }
+
+      setScenario({
+        id: analysisId,
+        label: `Live Analysis — ${riskLevel.charAt(0).toUpperCase() + riskLevel.slice(1)} Risk`,
+        riskLevel: (riskLevel in riskConfig ? riskLevel : 'low') as 'low' | 'medium' | 'high' | 'critical',
+        score,
+        reason: risk.explanation ?? `${riskLevel} risk detected from live analysis`,
+        evidence: evidenceList.slice(0, 5),
+        recommended: riskLevel === 'critical'
+          ? 'STOP IMMEDIATELY. Disconnect internet. Remove remote-access app. Contact bank fraud helpline.'
+          : riskLevel === 'high'
+          ? 'Do not click any links. Do not install any apps. Disconnect from the call. Report to bank.'
+          : riskLevel === 'medium'
+          ? 'Do not share OTP or PIN. Verify caller identity through official bank number.'
+          : 'Low risk. No immediate action required. Stay vigilant.',
+        isSimulated: false,
+      });
+      setHoldActive(false);
+      setAcknowledged(false);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Failed to import analysis');
+    } finally {
+      setImportLoading(false);
+    }
   }
 
   function activateHold() {
@@ -109,11 +188,30 @@ export default function SafetyInterventionPage() {
         <div>
           <Card>
             <CardHeader>
-              <CardTitle>Demo Scenarios</CardTitle>
-              <Badge variant="demo">SIMULATED</Badge>
+              <CardTitle>Scenarios</CardTitle>
+              <Badge variant="demo">DEMO</Badge>
             </CardHeader>
+
+            {/* Import from real analysis */}
+            <div className="mb-3 pb-3 border-b border-[#1E2D47]">
+              <p className="text-xs text-[#94A3B8] mb-2">Import from last real analysis:</p>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={importLastAnalysis}
+                disabled={importLoading}
+                className="w-full"
+              >
+                {importLoading ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
+                Import Last Analysis
+              </Button>
+              {importError && (
+                <p className="text-[10px] text-amber-400 mt-1.5">{importError}</p>
+              )}
+            </div>
+
             <p className="text-xs text-[#94A3B8] mb-3">
-              Select a scenario to see what a safety intervention looks like:
+              Or select a demo scenario:
             </p>
             <div className="space-y-2">
               {DEMO_SCENARIOS.map((s) => {
